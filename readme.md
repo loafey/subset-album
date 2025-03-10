@@ -1,4 +1,8 @@
 # subset-album
+
+> [!WARNING]  
+> The code is very messy :)
+
 Very quick and dirty GUI tool I made to detect if your music collection contains songs contained by multiple albums.
 Easiest way to run it is with `cargo run --release -- <path-to-collection>`.
 
