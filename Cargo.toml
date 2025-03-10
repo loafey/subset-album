@@ -1,0 +1,9 @@
+[package]
+name = "subset-album"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.97"
+eframe = "0.31.1"
+egui = "0.31.1"
