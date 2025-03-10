@@ -26,7 +26,7 @@ Artist 2.
     - CoolSingle
         - OtherSong 
 ```
-Note that the tool only supports `.mp3`, `.flac` and MPEG-4 files, and that it simply checks the title. 
+Note that the tool only supports `.mp3`, `.flac` and MPEG-4 files, and that it simply checks the title of songs in the metadata. 
 This means that if an artist has release two different songs with the same name, this tool will think they are the same.
 
 ## Info this tool can give you about an album
