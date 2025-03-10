@@ -99,7 +99,7 @@ fn get_data() -> Result<Artists> {
 enum Info {
     PartialSubset(String, String, Vec<String>),
     Subset(String, String),
-    Empty(String),
+    Empty,
 }
 type InfoTree = BTreeMap<Artist, BTreeMap<String, Vec<Info>>>;
 fn get_info(artists: &Artists) -> InfoTree {
@@ -222,7 +222,7 @@ impl eframe::App for App {
                                                         Color32::GREEN,
                                                         format!("{a:?} is a subset of {b:?}"),
                                                     ),
-                                                    Info::Empty(_) => (
+                                                    Info::Empty => (
                                                         "Empty",
                                                         Color32::RED,
                                                         "this album contains no songs".to_string(),
