@@ -114,7 +114,7 @@ fn get_info(artists: &Artists) -> InfoTree {
             // Try to find empty albums
             let mut is_empty = false;
             if songs_a.is_empty() {
-                album_info.push(Info::Empty(album_a.clone()));
+                album_info.push(Info::Empty);
                 is_empty = true;
             }
 
