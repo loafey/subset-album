@@ -4,6 +4,7 @@ use egui::{CollapsingHeader, Color32, RichText, ScrollArea, Ui};
 use rayon::prelude::*;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    env::args,
     fs,
     sync::{
         atomic::{AtomicUsize, Ordering::Relaxed},
@@ -12,8 +13,6 @@ use std::{
     thread,
     time::Duration,
 };
-
-const ROOT: &str = "/home/loafey/BreadBox/Jellyfin/Music/Lidarr";
 
 type Artists = BTreeMap<Artist, Albums>;
 type Albums = BTreeMap<String, Album>;
@@ -69,7 +68,7 @@ fn is_song(end: &str) -> bool {
 }
 
 fn get_data(sender: &mut Sender<Message>) -> Result<Artists> {
-    let artists = fs::read_dir(ROOT)?;
+    let artists = fs::read_dir(args().nth(1).unwrap())?;
     let mut top = Artists::new();
     let mut total_songs = 0;
     for artist in artists {
@@ -266,6 +265,7 @@ impl App {
                 .auto_shrink([false, false])
                 .id_salt("all-albums")
                 .show(&mut ui[0], |ui| {
+                    ui.heading("All albums:");
                     for (artist, albums) in &self.artists {
                         CollapsingHeader::new(artist)
                             .id_salt(format!("{artist}-info"))
@@ -284,6 +284,7 @@ impl App {
                 .auto_shrink([false, false])
                 .id_salt("overlapps")
                 .show(&mut ui[1], |ui| {
+                    ui.heading("Clean up work:");
                     for (artist, tree) in &self.info {
                         ui.collapsing(artist, |ui| {
                             for (album, fields) in tree {
