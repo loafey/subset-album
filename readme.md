@@ -26,9 +26,10 @@ Artist 2.
     - CoolSingle
         - OtherSong 
 ```
-Note that the tool only supports `.mp3`, `.flac` and MPEG-4 files.
+Note that the tool only supports `.mp3`, `.flac` and MPEG-4 files, and that it simply checks the title. 
+This means that if an artist has release two different songs with the same name, this tool will think they are the same.
 
 ## Info this tool can give you about an album
 - Empty: this album contains no songs.
-- Partial subset: songs in this album also exist in another album.
+- Partial subset: some songs in this album also exist in another album.
 - Subset: all songs in this album exist inside another album.
