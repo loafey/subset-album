@@ -26,3 +26,9 @@ Artist 2.
     - CoolSingle
         - OtherSong 
 ```
+Note that the tool only supports `.mp3`, `.flac` and MPEG-4 files.
+
+## Info this tool can give you about an album
+- Empty: this album contains no songs.
+- Partial subset: songs in this album also exist in another album.
+- Subset: all songs in this album exist inside another album.
