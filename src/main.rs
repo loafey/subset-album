@@ -1,11 +1,12 @@
 use anyhow::Result;
 use audiotags::Tag;
-use egui::{CollapsingHeader, Color32, RichText, ScrollArea, Ui};
+use egui::{CollapsingHeader, Color32, RichText, ScrollArea, TopBottomPanel, Ui};
 use rayon::prelude::*;
 use std::{
     collections::{BTreeMap, BTreeSet},
     env::args,
     fs,
+    path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering::Relaxed},
         mpsc::{channel, Receiver, Sender},
@@ -17,8 +18,29 @@ use std::{
 type Artists = BTreeMap<Artist, Albums>;
 type Albums = BTreeMap<String, Album>;
 type Artist = String;
-type Album = BTreeSet<Song>;
-type Song = String;
+type Album = Vec<Song>;
+
+#[derive(Clone)]
+struct Song {
+    name: String,
+    path: PathBuf,
+}
+impl PartialEq for Song {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+impl Eq for Song {}
+impl PartialOrd for Song {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.name.cmp(&other.name))
+    }
+}
+impl Ord for Song {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.partial_cmp(other).unwrap()
+    }
+}
 
 const MISSING: &str = "-- MISSING TITLE --";
 
@@ -93,12 +115,10 @@ fn get_data(sender: &mut Sender<Message>) -> Result<Artists> {
                 }
                 let song_name = song.file_name().to_string_lossy().to_string();
                 if is_song(&song_name) {
-                    // let song_name = Tag::new()
-                    //     .read_from_path(song.path())?
-                    //     .title()
-                    //     .unwrap_or(MISSING)
-                    //     .to_string();
-                    album_data.insert(song.path().to_string_lossy().to_string());
+                    album_data.push(Song {
+                        name: MISSING.to_string(),
+                        path: song.path(),
+                    });
                     total_songs += 1;
                 }
             }
@@ -112,17 +132,26 @@ fn get_data(sender: &mut Sender<Message>) -> Result<Artists> {
     }
 
     let fixed = AtomicUsize::new(0);
-    for albums in top.values_mut() {
-        albums.values_mut().par_bridge().for_each(|songs| {
-            let mut new_songs = BTreeSet::new();
-            for song in songs.clone() {
-                let song_name = Tag::new()
-                    .read_from_path(song)
-                    .unwrap()
-                    .title()
-                    .unwrap_or(MISSING)
-                    .to_string();
-                new_songs.insert(song_name);
+    for (artist, albums) in top.iter_mut() {
+        albums.iter_mut().par_bridge().for_each(|(album, songs)| {
+            let mut new_songs = Vec::new();
+            for Song { path, .. } in songs.clone() {
+                let name = Tag::new()
+                    .read_from_path(&path)
+                    .ok()
+                    .and_then(|v| v.title().map(|x| x.to_string()))
+                    .unwrap_or(MISSING.to_string());
+                sender
+                    .send(Message::AddSong(
+                        artist.clone(),
+                        album.clone(),
+                        Song {
+                            name: name.clone(),
+                            path: path.clone(),
+                        },
+                    ))
+                    .unwrap();
+                new_songs.push(Song { name, path });
                 let s = fixed.fetch_add(1, Relaxed);
                 sender.send(Message::Loading(s, total_songs)).unwrap();
             }
@@ -139,12 +168,10 @@ enum Info {
     PartialSubset(String, String, Vec<String>),
     Subset(String, String),
     Empty,
-    MissingTitle,
+    MissingTitle(Vec<String>),
 }
 type InfoTree = BTreeMap<Artist, BTreeMap<String, Vec<Info>>>;
-fn get_info(sender: &mut Sender<Message>, artists: &Artists) -> InfoTree {
-    let mut top = InfoTree::new();
-
+fn get_info(sender: &mut Sender<Message>, artists: &Artists) {
     let mut total_albums = 0;
     for albums in artists.values() {
         total_albums += albums.len();
@@ -153,28 +180,35 @@ fn get_info(sender: &mut Sender<Message>, artists: &Artists) -> InfoTree {
 
     let mut current_album = 0;
     for (artist, albums) in artists {
-        let mut artist_info = BTreeMap::new();
-
         for (a, (album_a, songs_a)) in albums.iter().enumerate() {
-            let mut album_info = Vec::new();
-
             // Try to find empty albums
             let mut is_empty = false;
             if songs_a.is_empty() {
-                album_info.push(Info::Empty);
+                sender
+                    .send(Message::AddInfo(
+                        artist.clone(),
+                        album_a.clone(),
+                        Info::Empty,
+                    ))
+                    .unwrap();
                 is_empty = true;
             }
 
             // Find missing names
-            let mut missing = false;
-            for song in songs_a {
-                if song == MISSING {
-                    missing = true;
-                    break;
+            let mut missing = Vec::new();
+            for Song { name, path } in songs_a {
+                if name == MISSING {
+                    missing.push(path.to_string_lossy().to_string());
                 }
             }
-            if missing {
-                album_info.push(Info::MissingTitle);
+            if !missing.is_empty() {
+                sender
+                    .send(Message::AddInfo(
+                        artist.clone(),
+                        album_a.clone(),
+                        Info::MissingTitle(missing),
+                    ))
+                    .unwrap();
             }
 
             // find subsets
@@ -194,19 +228,27 @@ fn get_info(sender: &mut Sender<Message>, artists: &Artists) -> InfoTree {
                     }
 
                     if overlaps == songs_a.len() {
-                        album_info.push(Info::Subset(album_a.clone(), album_b.clone()));
+                        sender
+                            .send(Message::AddInfo(
+                                artist.clone(),
+                                album_a.clone(),
+                                Info::Subset(album_a.clone(), album_b.clone()),
+                            ))
+                            .unwrap();
                     } else if overlaps > 0 {
-                        album_info.push(Info::PartialSubset(
-                            album_a.clone(),
-                            album_b.clone(),
-                            song_overlaps,
-                        ));
+                        sender
+                            .send(Message::AddInfo(
+                                artist.clone(),
+                                album_a.clone(),
+                                Info::PartialSubset(
+                                    album_a.clone(),
+                                    album_b.clone(),
+                                    song_overlaps.into_iter().map(|s| s.name).collect(),
+                                ),
+                            ))
+                            .unwrap();
                     }
                 }
-            }
-
-            if !album_info.is_empty() {
-                artist_info.insert(album_a.clone(), album_info);
             }
 
             current_album += 1;
@@ -214,21 +256,14 @@ fn get_info(sender: &mut Sender<Message>, artists: &Artists) -> InfoTree {
                 .send(Message::Loading(current_album, total_albums))
                 .unwrap();
         }
-
-        if !artist_info.is_empty() {
-            top.insert(artist.clone(), artist_info);
-        }
     }
-
-    top
 }
 
 fn main() -> Result<()> {
     let (mut sender, reciever) = channel();
     thread::spawn(move || {
         let artists = get_data(&mut sender).unwrap();
-        let info = get_info(&mut sender, &artists);
-        sender.send(Message::Done(artists, info)).unwrap();
+        get_info(&mut sender, &artists);
     });
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(
@@ -239,7 +274,7 @@ fn main() -> Result<()> {
                 artists: Default::default(),
                 info: Default::default(),
                 reciever,
-                loading_status: Some((0, usize::MAX)),
+                loading_status: (0, usize::MAX),
             }))
         }),
     )
@@ -249,11 +284,12 @@ fn main() -> Result<()> {
 
 enum Message {
     Loading(usize, usize),
-    Done(Artists, InfoTree),
+    AddSong(String, String, Song),
+    AddInfo(String, String, Info),
 }
 
 struct App {
-    loading_status: Option<(usize, usize)>,
+    loading_status: (usize, usize),
     reciever: Receiver<Message>,
     artists: Artists,
     info: InfoTree,
@@ -273,7 +309,7 @@ impl App {
                                 for (album, songs) in albums {
                                     ui.collapsing(album, |ui| {
                                         for song in songs {
-                                            ui.label(song);
+                                            ui.label(&song.name);
                                         }
                                     });
                                 }
@@ -305,9 +341,11 @@ impl App {
                                                             .join(",")
                                                     ),
                                                 ),
-                                                Info::MissingTitle => {
-                                                    ("Missing titles", Color32::BLUE, String::new())
-                                                }
+                                                Info::MissingTitle(titles) => (
+                                                    "Missing titles",
+                                                    Color32::BLUE,
+                                                    format!("\n{}", titles.join("\n\n")),
+                                                ),
                                                 Info::Subset(a, b) => (
                                                     "Subset",
                                                     Color32::GREEN,
@@ -332,46 +370,60 @@ impl App {
                 });
         });
     }
+
+    fn progress_bar(&self, ui: &mut Ui) {
+        let (cur, max) = self.loading_status;
+        let p = if max != 0 && cur != 0 {
+            let progress = cur as f32 / max as f32;
+            let progress_bar_len = 20;
+            (0..progress_bar_len)
+                .map(|i| {
+                    let percent = i as f32 / progress_bar_len as f32;
+                    if percent < progress {
+                        '◼'
+                    } else {
+                        '◻'
+                    }
+                })
+                .collect::<String>()
+        } else {
+            String::new()
+        };
+        ui.heading(format!("{p} {cur}/{max}"));
+    }
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         if let Ok(m) = self.reciever.try_recv() {
             match m {
-                Message::Loading(a, b) => self.loading_status = Some((a, b)),
-                Message::Done(artists, info) => {
-                    self.loading_status = None;
-                    self.artists = artists;
-                    self.info = info;
+                Message::Loading(a, b) => self.loading_status = (a, b),
+                Message::AddInfo(artist, album, info) => {
+                    self.info
+                        .entry(artist)
+                        .or_default()
+                        .entry(album)
+                        .or_default()
+                        .push(info);
+                }
+                Message::AddSong(artist, album, song) => {
+                    self.artists
+                        .entry(artist)
+                        .or_default()
+                        .entry(album)
+                        .or_default()
+                        .push(song);
                 }
             }
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some((cur, max)) = self.loading_status {
-                ui.centered_and_justified(|ui| {
-                    let p = if max != 0 && cur != 0 {
-                        let progress = cur as f32 / max as f32;
-                        let progress_bar_len = 20;
-                        format!(
-                            "\n{}",
-                            (0..progress_bar_len)
-                                .map(|i| {
-                                    let percent = i as f32 / progress_bar_len as f32;
-                                    if percent < progress {
-                                        '◼'
-                                    } else {
-                                        '◻'
-                                    }
-                                })
-                                .collect::<String>()
-                        )
-                    } else {
-                        String::new()
-                    };
-                    ui.heading(format!("{cur}/{max}{p}"));
-                });
+            if self.artists.is_empty() {
+                ui.centered_and_justified(|ui| self.progress_bar(ui));
             } else {
-                self.draw_data(ui);
+                TopBottomPanel::top("top-panel").show(ctx, |ui| self.progress_bar(ui));
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    self.draw_data(ui);
+                });
             }
         });
         ctx.request_repaint_after(Duration::from_secs_f64(0.066));
