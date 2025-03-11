@@ -136,7 +136,7 @@ fn get_data(
         top.insert(artist_name, albums_data);
     }
 
-    let fixed = AtomicUsize::new(0);
+    let fixed = AtomicUsize::new(1);
     for (artist, albums) in top.iter_mut() {
         albums.iter_mut().par_bridge().for_each(|(album, songs)| {
             let mut new_songs = Vec::new();
@@ -182,94 +182,94 @@ enum Info {
     MissingTitle(Vec<String>),
 }
 type InfoTree = BTreeMap<Artist, BTreeMap<String, Vec<Info>>>;
-fn get_info(sender: &mut Sender<ClientMessage>, artists: &Artists) {
-    for (artist, albums) in artists {
-        for (a, (album_a, songs_a)) in albums.iter().enumerate() {
-            // Try to find empty albums
-            let mut is_empty = false;
-            if songs_a.is_empty() {
-                sender
-                    .send(ClientMessage::AddInfo(
-                        artist.clone(),
-                        album_a.clone(),
-                        Info::Empty,
-                    ))
-                    .unwrap();
-                is_empty = true;
-            }
+fn get_info(
+    sender: &mut Sender<ClientMessage>,
+    artist: String,
+    albums: BTreeMap<String, Vec<Song>>,
+) {
+    for (a, (album_a, songs_a)) in albums.iter().enumerate() {
+        // Try to find empty albums
+        let mut is_empty = false;
+        if songs_a.is_empty() {
+            sender
+                .send(ClientMessage::AddInfo(
+                    artist.clone(),
+                    album_a.clone(),
+                    Info::Empty,
+                ))
+                .unwrap();
+            is_empty = true;
+        }
 
-            // Find missing names
-            let mut missing = Vec::new();
-            for Song { name, path } in songs_a {
-                if name == MISSING {
-                    missing.push(path.to_string_lossy().to_string());
+        // Find missing names
+        let mut missing = Vec::new();
+        for Song { name, path } in songs_a {
+            if name == MISSING {
+                missing.push(path.to_string_lossy().to_string());
+            }
+        }
+        if !missing.is_empty() {
+            sender
+                .send(ClientMessage::AddInfo(
+                    artist.clone(),
+                    album_a.clone(),
+                    Info::MissingTitle(missing),
+                ))
+                .unwrap();
+        }
+
+        // find subsets
+        if !is_empty {
+            for (b, (album_b, songs_b)) in albums.iter().enumerate() {
+                if a == b {
+                    continue;
                 }
-            }
-            if !missing.is_empty() {
-                sender
-                    .send(ClientMessage::AddInfo(
-                        artist.clone(),
-                        album_a.clone(),
-                        Info::MissingTitle(missing),
-                    ))
-                    .unwrap();
-            }
 
-            // find subsets
-            if !is_empty {
-                for (b, (album_b, songs_b)) in albums.iter().enumerate() {
-                    if a == b {
-                        continue;
+                let mut overlaps = 0;
+                let mut song_overlaps = Vec::new();
+                for song in songs_a {
+                    if songs_b.contains(song) {
+                        overlaps += 1;
+                        song_overlaps.push(song.clone());
                     }
+                }
 
-                    let mut overlaps = 0;
-                    let mut song_overlaps = Vec::new();
-                    for song in songs_a {
-                        if songs_b.contains(song) {
-                            overlaps += 1;
-                            song_overlaps.push(song.clone());
-                        }
-                    }
-
-                    if overlaps == songs_a.len() {
-                        sender
-                            .send(ClientMessage::AddInfo(
-                                artist.clone(),
+                if overlaps == songs_a.len() {
+                    sender
+                        .send(ClientMessage::AddInfo(
+                            artist.clone(),
+                            album_a.clone(),
+                            Info::Subset(album_a.clone(), album_b.clone()),
+                        ))
+                        .unwrap();
+                } else if overlaps > 0 {
+                    sender
+                        .send(ClientMessage::AddInfo(
+                            artist.clone(),
+                            album_a.clone(),
+                            Info::PartialSubset(
                                 album_a.clone(),
-                                Info::Subset(album_a.clone(), album_b.clone()),
-                            ))
-                            .unwrap();
-                    } else if overlaps > 0 {
-                        sender
-                            .send(ClientMessage::AddInfo(
-                                artist.clone(),
-                                album_a.clone(),
-                                Info::PartialSubset(
-                                    album_a.clone(),
-                                    album_b.clone(),
-                                    song_overlaps.into_iter().map(|s| s.name).collect(),
-                                ),
-                            ))
-                            .unwrap();
-                    }
+                                album_b.clone(),
+                                song_overlaps.into_iter().map(|s| s.name).collect(),
+                            ),
+                        ))
+                        .unwrap();
                 }
             }
         }
-        sender.send(ClientMessage::InfoLoadingDone).unwrap();
     }
+    sender.send(ClientMessage::InfoLoadingDone).unwrap();
 }
 
 fn main() -> Result<()> {
     let (mut sender, reciever) = channel();
     let (mut info_sender, info_reciever) = channel();
-    thread::spawn(move || {
-        let artists = get_data(&mut sender, &mut info_sender).unwrap();
-        get_info(&mut sender, &artists);
-    });
+    let mut sender_2 = sender.clone();
+    thread::spawn(move || get_data(&mut sender, &mut info_sender).unwrap());
     thread::spawn(move || {
         while let Ok(m) = info_reciever.recv() {
             match m {
-                InfoMessage::Analyze(art, _) => println!("work on {art}"),
+                InfoMessage::Analyze(art, m) => get_info(&mut sender_2, art, m),
             }
         }
     });
@@ -365,7 +365,7 @@ impl App {
                                                 ),
                                                 Info::Subset(a, b) => (
                                                     "Subset",
-                                                    Color32::GREEN,
+                                                    Color32::RED,
                                                     format!("{a:?} is a subset of {b:?}"),
                                                 ),
                                                 Info::Empty => (
@@ -412,7 +412,12 @@ impl App {
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        let mut i = 0;
         while let Ok(m) = self.reciever.try_recv() {
+            i += 1;
+            if i > 60 {
+                break;
+            }
             match m {
                 ClientMessage::ArtistLoading(a, b) => self.artist_loading_status = (a, b),
                 ClientMessage::InfoLoadingAdd => self.info_loading_status.1 += 1,
