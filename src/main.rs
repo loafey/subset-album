@@ -157,6 +157,7 @@ fn get_data(sender: &mut Sender<Message>) -> Result<Artists> {
             }
 
             *songs = new_songs;
+            sender.send(Message::InfoLoadingAdd).unwrap();
         });
     }
 
@@ -172,15 +173,6 @@ enum Info {
 }
 type InfoTree = BTreeMap<Artist, BTreeMap<String, Vec<Info>>>;
 fn get_info(sender: &mut Sender<Message>, artists: &Artists) {
-    let mut total_albums = 0;
-    for albums in artists.values() {
-        total_albums += albums.len();
-        sender
-            .send(Message::ArtistLoading(0, total_albums))
-            .unwrap();
-    }
-
-    let mut current_album = 0;
     for (artist, albums) in artists {
         for (a, (album_a, songs_a)) in albums.iter().enumerate() {
             // Try to find empty albums
@@ -253,10 +245,7 @@ fn get_info(sender: &mut Sender<Message>, artists: &Artists) {
                 }
             }
 
-            current_album += 1;
-            sender
-                .send(Message::ArtistLoading(current_album, total_albums))
-                .unwrap();
+            sender.send(Message::InfoLoadingDone).unwrap();
         }
     }
 }
@@ -277,7 +266,7 @@ fn main() -> Result<()> {
                 info: Default::default(),
                 reciever,
                 artist_loading_status: (0, usize::MAX),
-                info_loading_status: (0, usize::MAX),
+                info_loading_status: (0, 0),
             }))
         }),
     )
@@ -287,7 +276,8 @@ fn main() -> Result<()> {
 
 enum Message {
     ArtistLoading(usize, usize),
-    InfoLoading(usize, usize),
+    InfoLoadingDone,
+    InfoLoadingAdd,
     AddSong(String, String, Song),
     AddInfo(String, String, Info),
 }
@@ -377,23 +367,24 @@ impl App {
     }
 
     fn progress_bar(&self, ui: &mut Ui, title: &str, (cur, max): (usize, usize)) {
+        let progress_bar_len = 20;
         let p = if max != 0 && cur != 0 {
             let progress = cur as f32 / max as f32;
-            let progress_bar_len = 20;
             (0..progress_bar_len)
                 .map(|i| {
                     let percent = i as f32 / progress_bar_len as f32;
                     if percent < progress {
-                        '◼'
+                        '█'
                     } else {
-                        '◻'
+                        '░'
                     }
                 })
                 .collect::<String>()
         } else {
-            String::new()
+            "░".repeat(progress_bar_len)
         };
-        let text = RichText::new(format!("{title}: {p} {cur}/{max}")).font(FontId::monospace(16.0));
+        let text =
+            RichText::new(format!("{title}: ▟{p}▛ {cur}/{max}")).font(FontId::monospace(16.0));
         ui.heading(text);
     }
 }
@@ -402,7 +393,8 @@ impl eframe::App for App {
         if let Ok(m) = self.reciever.try_recv() {
             match m {
                 Message::ArtistLoading(a, b) => self.artist_loading_status = (a, b),
-                Message::InfoLoading(a, b) => self.info_loading_status = (a, b),
+                Message::InfoLoadingAdd => self.info_loading_status.1 += 1,
+                Message::InfoLoadingDone => self.info_loading_status.0 += 1,
                 Message::AddInfo(artist, album, info) => {
                     self.info
                         .entry(artist)
@@ -429,8 +421,8 @@ impl eframe::App for App {
                 });
             } else {
                 TopBottomPanel::top("top-panel").show(ctx, |ui| {
-                    self.progress_bar(ui, "Mapping albums", self.artist_loading_status);
-                    self.progress_bar(ui, "Finding faults", self.info_loading_status);
+                    self.progress_bar(ui, "Mapping artists", self.artist_loading_status);
+                    self.progress_bar(ui, " Finding faults", self.info_loading_status);
                 });
                 egui::CentralPanel::default().show(ctx, |ui| {
                     self.draw_data(ui);
