@@ -6,10 +6,8 @@ use std::{
     collections::BTreeMap,
     env::args,
     fs,
-    sync::{
-        atomic::{AtomicUsize, Ordering::Relaxed},
-        mpsc::{channel, Receiver, Sender},
-    },
+    path::PathBuf,
+    sync::mpsc::{channel, Receiver, Sender},
     thread,
     time::Duration,
 };
@@ -20,88 +18,86 @@ mod messages;
 use messages::*;
 
 fn get_data(
+    recv: Receiver<WorkMessage>,
     sender: &mut Sender<ClientMessage>,
     info_sender: &mut Sender<InfoMessage>,
-) -> Result<Artists> {
-    let artists = fs::read_dir(args().nth(1).unwrap())?;
-    let mut top = Artists::new();
-    let mut total_songs = 0;
-    for artist in artists {
-        let mut albums_data = Albums::new();
-        let artist = artist?;
-        let artist_name = artist.file_name().to_string_lossy().to_string();
+) -> Result<()> {
+    loop {
+        let mut top = Artists::new();
+        loop {
+            let WorkMessage::WorkOnFolder(artist) = match recv.recv_timeout(Duration::from_secs(1))
+            {
+                Ok(o) => o,
+                Err(e) => match e {
+                    std::sync::mpsc::RecvTimeoutError::Timeout => break,
+                    std::sync::mpsc::RecvTimeoutError::Disconnected => return Ok(()),
+                },
+            };
+            let mut albums_data = Albums::new();
+            let artist_name = artist.file_name().unwrap().to_string_lossy().to_string();
 
-        let albums = fs::read_dir(artist.path())?;
-        for album in albums {
-            let mut album_data = Album::new();
-            let album = album?;
-            if album.path().is_file() {
-                continue;
-            }
-            let album_name = album.file_name().to_string_lossy().to_string();
-
-            let mut songs = fs::read_dir(album.path())?.collect::<Vec<_>>();
-            while let Some(song) = songs.pop() {
-                let song = song?;
-                if song.path().is_dir() {
-                    songs.extend(fs::read_dir(song.path())?);
+            let albums = fs::read_dir(artist)?;
+            for album in albums {
+                let mut album_data = Album::new();
+                let album = album?;
+                if album.path().is_file() {
+                    continue;
                 }
-                let song_name = song.file_name().to_string_lossy().to_string();
-                if is_song(&song_name) {
-                    album_data.push(Song {
-                        name: MISSING.to_string(),
-                        path: song.path(),
-                    });
-                    total_songs += 1;
+                let album_name = album.file_name().to_string_lossy().to_string();
+
+                let mut songs = fs::read_dir(album.path())?.collect::<Vec<_>>();
+                while let Some(song) = songs.pop() {
+                    let song = song?;
+                    if song.path().is_dir() {
+                        songs.extend(fs::read_dir(song.path())?);
+                        continue;
+                    }
+                    let song_name = song.file_name().to_string_lossy().to_string();
+                    if is_song(&song_name) {
+                        album_data.push(Song {
+                            name: MISSING.to_string(),
+                            path: song.path(),
+                        });
+                        sender.send(ClientMessage::ArtistLoadingAdd).unwrap();
+                    }
                 }
+
+                albums_data.insert(album_name, album_data);
             }
 
-            albums_data.insert(album_name, album_data);
+            top.insert(artist_name, albums_data);
         }
 
-        sender
-            .send(ClientMessage::ArtistLoading(0, total_songs))
-            .unwrap();
+        for (artist, mut albums) in top {
+            albums.iter_mut().par_bridge().for_each(|(album, songs)| {
+                let mut new_songs = Vec::new();
+                for Song { path, .. } in songs.clone() {
+                    let name = Tag::new()
+                        .read_from_path(&path)
+                        .ok()
+                        .and_then(|v| v.title().map(|x| x.to_string()))
+                        .unwrap_or(MISSING.to_string());
+                    sender
+                        .send(ClientMessage::AddSong(
+                            artist.clone(),
+                            album.clone(),
+                            Song {
+                                name: name.clone(),
+                                path: path.clone(),
+                            },
+                        ))
+                        .unwrap();
+                    new_songs.push(Song { name, path });
+                }
 
-        top.insert(artist_name, albums_data);
+                *songs = new_songs;
+            });
+            sender.send(ClientMessage::InfoLoadingAdd).unwrap();
+            info_sender
+                .send(InfoMessage::Analyze(artist.clone(), albums.clone()))
+                .unwrap();
+        }
     }
-
-    let fixed = AtomicUsize::new(1);
-    for (artist, albums) in top.iter_mut() {
-        albums.iter_mut().par_bridge().for_each(|(album, songs)| {
-            let mut new_songs = Vec::new();
-            for Song { path, .. } in songs.clone() {
-                let name = Tag::new()
-                    .read_from_path(&path)
-                    .ok()
-                    .and_then(|v| v.title().map(|x| x.to_string()))
-                    .unwrap_or(MISSING.to_string());
-                sender
-                    .send(ClientMessage::AddSong(
-                        artist.clone(),
-                        album.clone(),
-                        Song {
-                            name: name.clone(),
-                            path: path.clone(),
-                        },
-                    ))
-                    .unwrap();
-                new_songs.push(Song { name, path });
-                let s = fixed.fetch_add(1, Relaxed);
-                sender
-                    .send(ClientMessage::ArtistLoading(s, total_songs))
-                    .unwrap();
-            }
-
-            *songs = new_songs;
-        });
-        sender.send(ClientMessage::InfoLoadingAdd).unwrap();
-        info_sender
-            .send(InfoMessage::Analyze(artist.clone(), albums.clone()))
-            .unwrap();
-    }
-
-    Ok(top)
 }
 
 type InfoTree = BTreeMap<Artist, BTreeMap<String, Vec<Info>>>;
@@ -186,13 +182,36 @@ fn get_info(
 
 fn main() -> Result<()> {
     let (mut sender, reciever) = channel();
-    let (mut info_sender, info_reciever) = channel();
-    let mut sender_2 = sender.clone();
-    thread::spawn(move || get_data(&mut sender, &mut info_sender).unwrap());
+    let (work_sender, work_reciever) = channel();
+    let (info_sender, info_reciever) = channel();
+    thread::spawn({
+        let work_sender = work_sender.clone();
+        let sender = sender.clone();
+        move || {
+            let artists = fs::read_dir(args().nth(1).unwrap()).unwrap();
+            for artist in artists {
+                let artist = artist.unwrap();
+                sender
+                    .send(ClientMessage::AddArtistPath(
+                        artist.file_name().to_str().unwrap().to_string(),
+                        artist.path(),
+                    ))
+                    .unwrap();
+                work_sender
+                    .send(WorkMessage::WorkOnFolder(artist.path()))
+                    .unwrap();
+            }
+        }
+    });
+    thread::spawn({
+        let mut sender = sender.clone();
+        let mut info_sender = info_sender.clone();
+        move || get_data(work_reciever, &mut sender, &mut info_sender).unwrap()
+    });
     thread::spawn(move || {
         while let Ok(m) = info_reciever.recv() {
             match m {
-                InfoMessage::Analyze(art, m) => get_info(&mut sender_2, art, m),
+                InfoMessage::Analyze(art, m) => get_info(&mut sender, art, m),
             }
         }
     });
@@ -205,8 +224,10 @@ fn main() -> Result<()> {
                 artists: Default::default(),
                 info: Default::default(),
                 reciever,
-                artist_loading_status: (0, usize::MAX),
+                artist_loading_status: (0, 0),
                 info_loading_status: (0, 0),
+                work_sender,
+                artist_paths: Default::default(),
             }))
         }),
     )
@@ -218,17 +239,19 @@ struct App {
     artist_loading_status: (usize, usize),
     info_loading_status: (usize, usize),
     reciever: Receiver<ClientMessage>,
+    work_sender: Sender<WorkMessage>,
     artists: Artists,
     info: InfoTree,
+    artist_paths: BTreeMap<String, PathBuf>,
 }
 impl App {
-    fn draw_data(&self, ui: &mut Ui) {
+    fn draw_data(&mut self, ui: &mut Ui) {
         ui.columns(2, |ui| {
             ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .id_salt("all-albums")
                 .show(&mut ui[0], |ui| {
-                    ui.heading("All albums:");
+                    ui.heading("All artists:");
                     for (artist, albums) in &self.artists {
                         CollapsingHeader::new(artist)
                             .id_salt(format!("{artist}-info"))
@@ -247,9 +270,25 @@ impl App {
                 .auto_shrink([false, false])
                 .id_salt("overlapps")
                 .show(&mut ui[1], |ui| {
-                    ui.heading("Clean up work:");
-                    for (artist, tree) in &self.info {
-                        ui.collapsing(artist, |ui| {
+                    ui.heading("Potential problems:");
+                    for (artist, tree) in self.info.clone() {
+                        ui.collapsing(&artist, |ui| {
+                            if ui.button("Reload").clicked() {
+                                let v = self.artists.remove(&artist);
+                                let _ = self.info.remove(&artist);
+                                let songs = v
+                                    .map(|v| v.into_values().map(|v| v.len()).sum::<usize>())
+                                    .unwrap_or_default();
+                                self.artist_loading_status.0 -= songs;
+                                self.artist_loading_status.1 -= songs;
+                                self.info_loading_status.0 -= 1;
+                                self.info_loading_status.1 -= 1;
+                                self.work_sender
+                                    .send(WorkMessage::WorkOnFolder(
+                                        self.artist_paths.get(&artist).unwrap().clone(),
+                                    ))
+                                    .unwrap();
+                            }
                             for (album, fields) in tree {
                                 CollapsingHeader::new(album)
                                     .default_open(true)
@@ -324,14 +363,13 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         let mut i = 0;
         while let Ok(m) = self.reciever.try_recv() {
-            i += 1;
-            if i > 60 {
-                break;
-            }
             match m {
-                ClientMessage::ArtistLoading(a, b) => self.artist_loading_status = (a, b),
+                ClientMessage::ArtistLoadingAdd => self.artist_loading_status.1 += 1,
                 ClientMessage::InfoLoadingAdd => self.info_loading_status.1 += 1,
                 ClientMessage::InfoLoadingDone => self.info_loading_status.0 += 1,
+                ClientMessage::AddArtistPath(artist, path) => {
+                    self.artist_paths.insert(artist, path);
+                }
                 ClientMessage::AddInfo(artist, album, info) => {
                     self.info
                         .entry(artist)
@@ -341,6 +379,7 @@ impl eframe::App for App {
                         .push(info);
                 }
                 ClientMessage::AddSong(artist, album, song) => {
+                    self.artist_loading_status.0 += 1;
                     self.artists
                         .entry(artist)
                         .or_default()
@@ -348,6 +387,11 @@ impl eframe::App for App {
                         .or_default()
                         .push(song);
                 }
+            }
+
+            i += 1;
+            if i > 60 {
+                break;
             }
         }
 
