@@ -1,6 +1,6 @@
 use anyhow::Result;
 use audiotags::Tag;
-use egui::{CollapsingHeader, Color32, RichText, ScrollArea, TopBottomPanel, Ui};
+use egui::{CollapsingHeader, Color32, FontId, RichText, ScrollArea, TopBottomPanel, Ui};
 use rayon::prelude::*;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -126,7 +126,7 @@ fn get_data(sender: &mut Sender<Message>) -> Result<Artists> {
             albums_data.insert(album_name, album_data);
         }
 
-        sender.send(Message::Loading(0, total_songs)).unwrap();
+        sender.send(Message::ArtistLoading(0, total_songs)).unwrap();
 
         top.insert(artist_name, albums_data);
     }
@@ -153,7 +153,7 @@ fn get_data(sender: &mut Sender<Message>) -> Result<Artists> {
                     .unwrap();
                 new_songs.push(Song { name, path });
                 let s = fixed.fetch_add(1, Relaxed);
-                sender.send(Message::Loading(s, total_songs)).unwrap();
+                sender.send(Message::ArtistLoading(s, total_songs)).unwrap();
             }
 
             *songs = new_songs;
@@ -175,7 +175,9 @@ fn get_info(sender: &mut Sender<Message>, artists: &Artists) {
     let mut total_albums = 0;
     for albums in artists.values() {
         total_albums += albums.len();
-        sender.send(Message::Loading(0, total_albums)).unwrap();
+        sender
+            .send(Message::ArtistLoading(0, total_albums))
+            .unwrap();
     }
 
     let mut current_album = 0;
@@ -253,7 +255,7 @@ fn get_info(sender: &mut Sender<Message>, artists: &Artists) {
 
             current_album += 1;
             sender
-                .send(Message::Loading(current_album, total_albums))
+                .send(Message::ArtistLoading(current_album, total_albums))
                 .unwrap();
         }
     }
@@ -274,7 +276,8 @@ fn main() -> Result<()> {
                 artists: Default::default(),
                 info: Default::default(),
                 reciever,
-                loading_status: (0, usize::MAX),
+                artist_loading_status: (0, usize::MAX),
+                info_loading_status: (0, usize::MAX),
             }))
         }),
     )
@@ -283,13 +286,15 @@ fn main() -> Result<()> {
 }
 
 enum Message {
-    Loading(usize, usize),
+    ArtistLoading(usize, usize),
+    InfoLoading(usize, usize),
     AddSong(String, String, Song),
     AddInfo(String, String, Info),
 }
 
 struct App {
-    loading_status: (usize, usize),
+    artist_loading_status: (usize, usize),
+    info_loading_status: (usize, usize),
     reciever: Receiver<Message>,
     artists: Artists,
     info: InfoTree,
@@ -371,8 +376,7 @@ impl App {
         });
     }
 
-    fn progress_bar(&self, ui: &mut Ui) {
-        let (cur, max) = self.loading_status;
+    fn progress_bar(&self, ui: &mut Ui, title: &str, (cur, max): (usize, usize)) {
         let p = if max != 0 && cur != 0 {
             let progress = cur as f32 / max as f32;
             let progress_bar_len = 20;
@@ -389,14 +393,16 @@ impl App {
         } else {
             String::new()
         };
-        ui.heading(format!("{p} {cur}/{max}"));
+        let text = RichText::new(format!("{title}: {p} {cur}/{max}")).font(FontId::monospace(16.0));
+        ui.heading(text);
     }
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         if let Ok(m) = self.reciever.try_recv() {
             match m {
-                Message::Loading(a, b) => self.loading_status = (a, b),
+                Message::ArtistLoading(a, b) => self.artist_loading_status = (a, b),
+                Message::InfoLoading(a, b) => self.info_loading_status = (a, b),
                 Message::AddInfo(artist, album, info) => {
                     self.info
                         .entry(artist)
@@ -418,9 +424,14 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.artists.is_empty() {
-                ui.centered_and_justified(|ui| self.progress_bar(ui));
+                ui.centered_and_justified(|ui| {
+                    self.progress_bar(ui, "Mapping songs", self.artist_loading_status);
+                });
             } else {
-                TopBottomPanel::top("top-panel").show(ctx, |ui| self.progress_bar(ui));
+                TopBottomPanel::top("top-panel").show(ctx, |ui| {
+                    self.progress_bar(ui, "Mapping albums", self.artist_loading_status);
+                    self.progress_bar(ui, "Finding faults", self.info_loading_status);
+                });
                 egui::CentralPanel::default().show(ctx, |ui| {
                     self.draw_data(ui);
                 });
