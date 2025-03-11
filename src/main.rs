@@ -20,7 +20,7 @@ type Albums = BTreeMap<String, Album>;
 type Artist = String;
 type Album = Vec<Song>;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Song {
     name: String,
     path: PathBuf,
@@ -89,7 +89,10 @@ fn is_song(end: &str) -> bool {
         || end.ends_with(".cda")
 }
 
-fn get_data(sender: &mut Sender<Message>) -> Result<Artists> {
+fn get_data(
+    sender: &mut Sender<ClientMessage>,
+    info_sender: &mut Sender<InfoMessage>,
+) -> Result<Artists> {
     let artists = fs::read_dir(args().nth(1).unwrap())?;
     let mut top = Artists::new();
     let mut total_songs = 0;
@@ -126,7 +129,9 @@ fn get_data(sender: &mut Sender<Message>) -> Result<Artists> {
             albums_data.insert(album_name, album_data);
         }
 
-        sender.send(Message::ArtistLoading(0, total_songs)).unwrap();
+        sender
+            .send(ClientMessage::ArtistLoading(0, total_songs))
+            .unwrap();
 
         top.insert(artist_name, albums_data);
     }
@@ -142,7 +147,7 @@ fn get_data(sender: &mut Sender<Message>) -> Result<Artists> {
                     .and_then(|v| v.title().map(|x| x.to_string()))
                     .unwrap_or(MISSING.to_string());
                 sender
-                    .send(Message::AddSong(
+                    .send(ClientMessage::AddSong(
                         artist.clone(),
                         album.clone(),
                         Song {
@@ -153,12 +158,17 @@ fn get_data(sender: &mut Sender<Message>) -> Result<Artists> {
                     .unwrap();
                 new_songs.push(Song { name, path });
                 let s = fixed.fetch_add(1, Relaxed);
-                sender.send(Message::ArtistLoading(s, total_songs)).unwrap();
+                sender
+                    .send(ClientMessage::ArtistLoading(s, total_songs))
+                    .unwrap();
             }
 
             *songs = new_songs;
-            sender.send(Message::InfoLoadingAdd).unwrap();
         });
+        sender.send(ClientMessage::InfoLoadingAdd).unwrap();
+        info_sender
+            .send(InfoMessage::Analyze(artist.clone(), albums.clone()))
+            .unwrap();
     }
 
     Ok(top)
@@ -172,14 +182,14 @@ enum Info {
     MissingTitle(Vec<String>),
 }
 type InfoTree = BTreeMap<Artist, BTreeMap<String, Vec<Info>>>;
-fn get_info(sender: &mut Sender<Message>, artists: &Artists) {
+fn get_info(sender: &mut Sender<ClientMessage>, artists: &Artists) {
     for (artist, albums) in artists {
         for (a, (album_a, songs_a)) in albums.iter().enumerate() {
             // Try to find empty albums
             let mut is_empty = false;
             if songs_a.is_empty() {
                 sender
-                    .send(Message::AddInfo(
+                    .send(ClientMessage::AddInfo(
                         artist.clone(),
                         album_a.clone(),
                         Info::Empty,
@@ -197,7 +207,7 @@ fn get_info(sender: &mut Sender<Message>, artists: &Artists) {
             }
             if !missing.is_empty() {
                 sender
-                    .send(Message::AddInfo(
+                    .send(ClientMessage::AddInfo(
                         artist.clone(),
                         album_a.clone(),
                         Info::MissingTitle(missing),
@@ -223,7 +233,7 @@ fn get_info(sender: &mut Sender<Message>, artists: &Artists) {
 
                     if overlaps == songs_a.len() {
                         sender
-                            .send(Message::AddInfo(
+                            .send(ClientMessage::AddInfo(
                                 artist.clone(),
                                 album_a.clone(),
                                 Info::Subset(album_a.clone(), album_b.clone()),
@@ -231,7 +241,7 @@ fn get_info(sender: &mut Sender<Message>, artists: &Artists) {
                             .unwrap();
                     } else if overlaps > 0 {
                         sender
-                            .send(Message::AddInfo(
+                            .send(ClientMessage::AddInfo(
                                 artist.clone(),
                                 album_a.clone(),
                                 Info::PartialSubset(
@@ -244,17 +254,24 @@ fn get_info(sender: &mut Sender<Message>, artists: &Artists) {
                     }
                 }
             }
-
-            sender.send(Message::InfoLoadingDone).unwrap();
         }
+        sender.send(ClientMessage::InfoLoadingDone).unwrap();
     }
 }
 
 fn main() -> Result<()> {
     let (mut sender, reciever) = channel();
+    let (mut info_sender, info_reciever) = channel();
     thread::spawn(move || {
-        let artists = get_data(&mut sender).unwrap();
+        let artists = get_data(&mut sender, &mut info_sender).unwrap();
         get_info(&mut sender, &artists);
+    });
+    thread::spawn(move || {
+        while let Ok(m) = info_reciever.recv() {
+            match m {
+                InfoMessage::Analyze(art, _) => println!("work on {art}"),
+            }
+        }
     });
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(
@@ -274,7 +291,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-enum Message {
+enum ClientMessage {
     ArtistLoading(usize, usize),
     InfoLoadingDone,
     InfoLoadingAdd,
@@ -282,10 +299,15 @@ enum Message {
     AddInfo(String, String, Info),
 }
 
+#[derive(Debug)]
+enum InfoMessage {
+    Analyze(String, BTreeMap<String, Vec<Song>>),
+}
+
 struct App {
     artist_loading_status: (usize, usize),
     info_loading_status: (usize, usize),
-    reciever: Receiver<Message>,
+    reciever: Receiver<ClientMessage>,
     artists: Artists,
     info: InfoTree,
 }
@@ -390,12 +412,12 @@ impl App {
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        if let Ok(m) = self.reciever.try_recv() {
+        while let Ok(m) = self.reciever.try_recv() {
             match m {
-                Message::ArtistLoading(a, b) => self.artist_loading_status = (a, b),
-                Message::InfoLoadingAdd => self.info_loading_status.1 += 1,
-                Message::InfoLoadingDone => self.info_loading_status.0 += 1,
-                Message::AddInfo(artist, album, info) => {
+                ClientMessage::ArtistLoading(a, b) => self.artist_loading_status = (a, b),
+                ClientMessage::InfoLoadingAdd => self.info_loading_status.1 += 1,
+                ClientMessage::InfoLoadingDone => self.info_loading_status.0 += 1,
+                ClientMessage::AddInfo(artist, album, info) => {
                     self.info
                         .entry(artist)
                         .or_default()
@@ -403,7 +425,7 @@ impl eframe::App for App {
                         .or_default()
                         .push(info);
                 }
-                Message::AddSong(artist, album, song) => {
+                ClientMessage::AddSong(artist, album, song) => {
                     self.artists
                         .entry(artist)
                         .or_default()
