@@ -162,17 +162,17 @@ fn get_info(
                         ))
                         .unwrap();
                 } else if overlaps > 0 {
-                    sender
-                        .send(ClientMessage::AddInfo(
-                            artist.clone(),
-                            album_a.clone(),
-                            Info::PartialSubset(
-                                album_a.clone(),
-                                album_b.clone(),
-                                song_overlaps.into_iter().map(|s| s.name).collect(),
-                            ),
-                        ))
-                        .unwrap();
+                    // sender
+                    //     .send(ClientMessage::AddInfo(
+                    //         artist.clone(),
+                    //         album_a.clone(),
+                    //         Info::PartialSubset(
+                    //             album_a.clone(),
+                    //             album_b.clone(),
+                    //             song_overlaps.into_iter().map(|s| s.name).collect(),
+                    //         ),
+                    //     ))
+                    //     .unwrap();
                 }
             }
         }
