@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{cmp::Ordering, collections::BTreeMap, path::PathBuf};
 
 pub type Artists = BTreeMap<Artist, Albums>;
 pub type Albums = BTreeMap<String, Album>;
@@ -9,21 +9,25 @@ pub type Album = Vec<Song>;
 pub struct Song {
     pub name: String,
     pub path: PathBuf,
+    pub unique: bool,
 }
 impl PartialEq for Song {
     fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
+        !self.unique && !other.unique && self.name == other.name
     }
 }
 impl Eq for Song {}
 impl PartialOrd for Song {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.name.cmp(&other.name))
     }
 }
 impl Ord for Song {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.partial_cmp(other).unwrap()
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.unique || other.unique {
+            true => Ordering::Equal,
+            false => other.partial_cmp(other).unwrap(),
+        }
     }
 }
 

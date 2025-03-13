@@ -57,6 +57,7 @@ fn get_data(
                         album_data.push(Song {
                             name: MISSING.to_string(),
                             path: song.path(),
+                            unique: false,
                         });
                         sender.send(ClientMessage::ArtistLoadingAdd).unwrap();
                     }
@@ -72,22 +73,28 @@ fn get_data(
             albums.iter_mut().par_bridge().for_each(|(album, songs)| {
                 let mut new_songs = Vec::new();
                 for Song { path, .. } in songs.clone() {
-                    let name = Tag::new()
-                        .read_from_path(&path)
-                        .ok()
+                    let tag = Tag::new().read_from_path(&path).ok();
+                    let name = tag
+                        .as_ref()
                         .and_then(|v| v.title().map(|x| x.to_string()))
                         .unwrap_or(MISSING.to_string());
+                    let unique = tag
+                        .as_ref()
+                        .and_then(|v| v.comment().map(|x| x == "unique"))
+                        .unwrap_or_default();
+                    let data = Song {
+                        name: name.clone(),
+                        path: path.clone(),
+                        unique,
+                    };
                     sender
                         .send(ClientMessage::AddSong(
                             artist.clone(),
                             album.clone(),
-                            Song {
-                                name: name.clone(),
-                                path: path.clone(),
-                            },
+                            data.clone(),
                         ))
                         .unwrap();
-                    new_songs.push(Song { name, path });
+                    new_songs.push(data);
                 }
 
                 *songs = new_songs;
@@ -122,7 +129,7 @@ fn get_info(
 
         // Find missing names
         let mut missing = Vec::new();
-        for Song { name, path } in songs_a {
+        for Song { name, path, .. } in songs_a {
             if name == MISSING {
                 missing.push(path.to_string_lossy().to_string());
             }
@@ -162,17 +169,17 @@ fn get_info(
                         ))
                         .unwrap();
                 } else if overlaps > 0 {
-                    // sender
-                    //     .send(ClientMessage::AddInfo(
-                    //         artist.clone(),
-                    //         album_a.clone(),
-                    //         Info::PartialSubset(
-                    //             album_a.clone(),
-                    //             album_b.clone(),
-                    //             song_overlaps.into_iter().map(|s| s.name).collect(),
-                    //         ),
-                    //     ))
-                    //     .unwrap();
+                    sender
+                        .send(ClientMessage::AddInfo(
+                            artist.clone(),
+                            album_a.clone(),
+                            Info::PartialSubset(
+                                album_a.clone(),
+                                album_b.clone(),
+                                song_overlaps.into_iter().map(|s| s.name).collect(),
+                            ),
+                        ))
+                        .unwrap();
                 }
             }
         }
