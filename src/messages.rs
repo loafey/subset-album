@@ -4,8 +4,8 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[derive(Debug, Clone)]
 pub enum Info {
     PartialSubset(String, String, Vec<String>),
-    Subset(String, String),
-    Empty,
+    Subset(String, String, PathBuf),
+    Empty(PathBuf),
     MissingTitle(Vec<String>),
 }
 
@@ -20,7 +20,7 @@ pub enum ClientMessage {
 }
 
 pub enum InfoMessage {
-    Analyze(String, BTreeMap<String, Vec<Song>>),
+    Analyze(String, BTreeMap<String, (Vec<Song>, PathBuf)>),
 }
 
 pub enum WorkMessage {

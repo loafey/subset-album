@@ -38,7 +38,7 @@ fn get_data(
 
             let albums = fs::read_dir(artist)?;
             for album in albums {
-                let mut album_data = Album::new();
+                let mut album_data = Vec::new();
                 let album = album?;
                 if album.path().is_file() {
                     continue;
@@ -63,42 +63,45 @@ fn get_data(
                     }
                 }
 
-                albums_data.insert(album_name, album_data);
+                albums_data.insert(album_name, (album_data, album.path()));
             }
 
             top.insert(artist_name, albums_data);
         }
 
         for (artist, mut albums) in top {
-            albums.iter_mut().par_bridge().for_each(|(album, songs)| {
-                let mut new_songs = Vec::new();
-                for Song { path, .. } in songs.clone() {
-                    let tag = Tag::new().read_from_path(&path).ok();
-                    let name = tag
-                        .as_ref()
-                        .and_then(|v| v.title().map(|x| x.to_string()))
-                        .unwrap_or(MISSING.to_string());
-                    let unique = tag
-                        .as_ref()
-                        .and_then(|v| v.comment().map(|x| x == "unique"))
-                        .unwrap_or_default();
-                    let data = Song {
-                        name: name.clone(),
-                        path: path.clone(),
-                        unique,
-                    };
-                    sender
-                        .send(ClientMessage::AddSong(
-                            artist.clone(),
-                            album.clone(),
-                            data.clone(),
-                        ))
-                        .unwrap();
-                    new_songs.push(data);
-                }
+            albums
+                .iter_mut()
+                .par_bridge()
+                .for_each(|(album, (songs, _))| {
+                    let mut new_songs = Vec::new();
+                    for Song { path, .. } in songs.clone() {
+                        let tag = Tag::new().read_from_path(&path).ok();
+                        let name = tag
+                            .as_ref()
+                            .and_then(|v| v.title().map(|x| x.to_string()))
+                            .unwrap_or(MISSING.to_string());
+                        let unique = tag
+                            .as_ref()
+                            .and_then(|v| v.comment().map(|x| x == "unique"))
+                            .unwrap_or_default();
+                        let data = Song {
+                            name: name.clone(),
+                            path: path.clone(),
+                            unique,
+                        };
+                        sender
+                            .send(ClientMessage::AddSong(
+                                artist.clone(),
+                                album.clone(),
+                                data.clone(),
+                            ))
+                            .unwrap();
+                        new_songs.push(data);
+                    }
 
-                *songs = new_songs;
-            });
+                    *songs = new_songs;
+                });
             sender.send(ClientMessage::InfoLoadingAdd).unwrap();
             info_sender
                 .send(InfoMessage::Analyze(artist.clone(), albums.clone()))
@@ -111,9 +114,9 @@ type InfoTree = BTreeMap<Artist, BTreeMap<String, Vec<Info>>>;
 fn get_info(
     sender: &mut Sender<ClientMessage>,
     artist: String,
-    albums: BTreeMap<String, Vec<Song>>,
+    albums: BTreeMap<String, (Vec<Song>, PathBuf)>,
 ) {
-    for (a, (album_a, songs_a)) in albums.iter().enumerate() {
+    for (a, (album_a, (songs_a, path))) in albums.iter().enumerate() {
         // Try to find empty albums
         let mut is_empty = false;
         if songs_a.is_empty() {
@@ -121,7 +124,7 @@ fn get_info(
                 .send(ClientMessage::AddInfo(
                     artist.clone(),
                     album_a.clone(),
-                    Info::Empty,
+                    Info::Empty(path.clone()),
                 ))
                 .unwrap();
             is_empty = true;
@@ -146,7 +149,7 @@ fn get_info(
 
         // find subsets
         if !is_empty {
-            for (b, (album_b, songs_b)) in albums.iter().enumerate() {
+            for (b, (album_b, (songs_b, _))) in albums.iter().enumerate() {
                 if a == b {
                     continue;
                 }
@@ -160,15 +163,16 @@ fn get_info(
                     }
                 }
 
+                #[allow(clippy::overly_complex_bool_expr)]
                 if overlaps == songs_a.len() {
                     sender
                         .send(ClientMessage::AddInfo(
                             artist.clone(),
                             album_a.clone(),
-                            Info::Subset(album_a.clone(), album_b.clone()),
+                            Info::Subset(album_a.clone(), album_b.clone(), path.clone()),
                         ))
                         .unwrap();
-                } else if overlaps > 0 {
+                } else if overlaps > 0 && false {
                     sender
                         .send(ClientMessage::AddInfo(
                             artist.clone(),
@@ -263,7 +267,7 @@ impl App {
                         CollapsingHeader::new(artist)
                             .id_salt(format!("{artist}-info"))
                             .show(ui, |ui| {
-                                for (album, songs) in albums {
+                                for (album, (songs, _)) in albums {
                                     ui.collapsing(album, |ui| {
                                         for song in songs {
                                             ui.label(&song.name);
@@ -284,7 +288,7 @@ impl App {
                                 let v = self.artists.remove(&artist);
                                 let _ = self.info.remove(&artist);
                                 let songs = v
-                                    .map(|v| v.into_values().map(|v| v.len()).sum::<usize>())
+                                    .map(|v| v.into_values().map(|(v, _)| v.len()).sum::<usize>())
                                     .unwrap_or_default();
                                 self.artist_loading_status.0 -= songs;
                                 self.artist_loading_status.1 -= songs;
@@ -301,7 +305,7 @@ impl App {
                                     .default_open(true)
                                     .show(ui, |ui| {
                                         for field in fields {
-                                            let (text, color, bread) = match &field {
+                                            let (text, color, bread, remove_path) = match &field {
                                                 Info::PartialSubset(a, b, songs) => (
                                                     "Partial subset",
                                                     Color32::YELLOW,
@@ -313,27 +317,40 @@ impl App {
                                                             .collect::<Vec<_>>()
                                                             .join(",")
                                                     ),
+                                                    None,
                                                 ),
                                                 Info::MissingTitle(titles) => (
                                                     "Missing titles",
                                                     Color32::BLUE,
                                                     format!("\n{}", titles.join("\n\n")),
+                                                    None,
                                                 ),
-                                                Info::Subset(a, b) => (
+                                                Info::Subset(a, b, path) => (
                                                     "Subset",
                                                     Color32::RED,
                                                     format!("{a:?} is a subset of {b:?}"),
+                                                    Some(path),
                                                 ),
-                                                Info::Empty => (
+                                                Info::Empty(path) => (
                                                     "Empty",
                                                     Color32::RED,
                                                     "this album contains no songs".to_string(),
+                                                    Some(path),
                                                 ),
                                             };
                                             let label = RichText::new(text).color(color);
                                             ui.horizontal_wrapped(|ui| {
                                                 ui.label(label);
                                                 ui.label(bread);
+                                                if let Some(remove_path) = remove_path {
+                                                    if ui.button("Quick Remove").clicked() {
+                                                        if let Err(e) =
+                                                            std::fs::remove_dir_all(remove_path)
+                                                        {
+                                                            println!("Error removing dir: {e}")
+                                                        }
+                                                    }
+                                                };
                                             });
                                         }
                                     });
@@ -392,6 +409,7 @@ impl eframe::App for App {
                         .or_default()
                         .entry(album)
                         .or_default()
+                        .0
                         .push(song);
                 }
             }

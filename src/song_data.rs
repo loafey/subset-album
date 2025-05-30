@@ -3,7 +3,7 @@ use std::{cmp::Ordering, collections::BTreeMap, path::PathBuf};
 pub type Artists = BTreeMap<Artist, Albums>;
 pub type Albums = BTreeMap<String, Album>;
 pub type Artist = String;
-pub type Album = Vec<Song>;
+pub type Album = (Vec<Song>, PathBuf);
 
 #[derive(Clone, Debug)]
 pub struct Song {
